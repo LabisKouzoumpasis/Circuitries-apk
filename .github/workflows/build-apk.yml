@@ -134,7 +134,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Circuitries (latest build)
-          body: Automatic build of Circuitries `${{ env.SOURCE_REF }}` — version ${{ env.APP_VERSION_NAME }}. Download the APK below and open it on your phone.
+          name: Circuitries ${{ env.APP_VERSION_NAME }}
+          # The app's update check reads versionCode / versionName from this text — keep the format
+          body: |
+            Αυτόματη έκδοση του Circuitries (`${{ env.SOURCE_REF }}`). Κατέβασε το APK και άνοιξέ το στο κινητό.
+
+            versionName=${{ env.APP_VERSION_NAME }}
+            versionCode=${{ env.APP_VERSION_CODE }}
           files: Circuitries-latest.apk
           make_latest: true
