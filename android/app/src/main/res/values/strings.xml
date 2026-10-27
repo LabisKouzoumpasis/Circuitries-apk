@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">Circuitries</string>
-    <string name="title_activity_main">Circuitries</string>
-    <string name="package_name">com.labiskouzoumpasis.circuitries</string>
-    <string name="custom_url_scheme">com.labiskouzoumpasis.circuitries</string>
-</resources>
