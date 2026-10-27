@@ -1,0 +1,140 @@
+name: Build APK
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Circuitries branch, tag or commit to package
+        default: main
+      smoke_test:
+        description: Build with a placeholder page (checks the Android toolchain without reading the source repo)
+        type: boolean
+        default: false
+  # Sent by the Circuitries repo when its main branch changes
+  repository_dispatch:
+    types: [circuitries-updated]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REF: ${{ inputs.source_ref || github.event.client_payload.ref || vars.SOURCE_REF || 'main' }}
+      # Without the token the private source repo can't be read: fall back to a toolchain smoke test
+      SMOKE_TEST: ${{ (inputs.smoke_test || secrets.CIRCUITRIES_PAT == '') && 'true' || 'false' }}
+      HAS_PAT: ${{ secrets.CIRCUITRIES_PAT != '' }}
+      HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Warn about missing source token
+        if: env.HAS_PAT != 'true'
+        run: echo "::warning::Secret CIRCUITRIES_PAT is missing, so this run only builds a placeholder APK. Add a fine-grained token with Contents read on LabisKouzoumpasis/Circuitries (see README)."
+
+      - name: Check out Circuitries web app (${{ env.SOURCE_REF }})
+        if: env.SMOKE_TEST != 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: LabisKouzoumpasis/Circuitries
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.CIRCUITRIES_PAT }}
+          path: source
+
+      - name: Placeholder web app (smoke test)
+        if: env.SMOKE_TEST == 'true'
+        run: |
+          mkdir -p source/js
+          echo '<!doctype html><meta name="viewport" content="width=device-width"><h1>Circuitries smoke test</h1>' > source/index.html
+          echo '' > source/js/app.js
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      # ubuntu-latest ships the Android SDK (ANDROID_HOME); Gradle fetches any missing platform itself
+      - name: Install Capacitor
+        run: npm ci
+
+      - name: Copy web app and sync Android project
+        run: |
+          node scripts/copy-web.mjs
+          npx cap sync android
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then NAME="${GITHUB_REF_NAME#v}"; else NAME="1.0.${GITHUB_RUN_NUMBER}"; fi
+          echo "APP_VERSION_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "APP_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Decode signing keystore
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        if: env.HAS_KEYSTORE == 'true'
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Circuitries-$APP_VERSION_NAME.apk"
+
+      - name: Build debug APK (no keystore secret)
+        if: env.HAS_KEYSTORE != 'true'
+        working-directory: android
+        run: |
+          echo "::warning::ANDROID_KEYSTORE_BASE64 not set - building a debug-signed APK instead."
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Circuitries-$APP_VERSION_NAME-debug.apk"
+
+      - name: Verify signature
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs Circuitries-*.apk
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: Circuitries-${{ env.APP_VERSION_NAME }}
+          path: Circuitries-*.apk
+
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v') && env.HAS_KEYSTORE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Circuitries-*.apk
+          generate_release_notes: true
+
+      - name: Prepare "latest" file name
+        if: env.HAS_KEYSTORE == 'true' && env.SMOKE_TEST != 'true' && (github.ref == 'refs/heads/main' || github.event_name == 'repository_dispatch')
+        run: cp "Circuitries-$APP_VERSION_NAME.apk" Circuitries-latest.apk
+
+      - name: Publish "latest" release
+        if: env.HAS_KEYSTORE == 'true' && env.SMOKE_TEST != 'true' && (github.ref == 'refs/heads/main' || github.event_name == 'repository_dispatch')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Circuitries (latest build)
+          body: Automatic build of Circuitries `${{ env.SOURCE_REF }}` — version ${{ env.APP_VERSION_NAME }}. Download the APK below and open it on your phone.
+          files: Circuitries-latest.apk
+          make_latest: true
